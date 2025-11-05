@@ -32,11 +32,10 @@ type Config struct {
 	Username string
 	Since    time.Time
 	Until    time.Time
-	Repos    []RepoConfig
+	Repos    []NWO
 }
 
-// RepoConfig represents a repository configuration
-type RepoConfig struct {
+type NWO struct {
 	Owner string
 	Name  string
 }
@@ -51,6 +50,46 @@ type PullRequestInfo struct {
 	MergedAt    *time.Time
 }
 
+// parseRepositories parses a comma-separated list of repositories in owner/name format
+func parseRepositories(repoList string) ([]NWO, error) {
+	if repoList == "" {
+		return nil, fmt.Errorf("repository list cannot be empty")
+	}
+
+	var repos []NWO
+	repoStrings := strings.Split(repoList, ",")
+
+	for _, repoStr := range repoStrings {
+		repoStr = strings.TrimSpace(repoStr)
+		if repoStr == "" {
+			continue // Skip empty entries
+		}
+
+		parts := strings.Split(repoStr, "/")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid repository format '%s': expected 'owner/name'", repoStr)
+		}
+
+		owner := strings.TrimSpace(parts[0])
+		name := strings.TrimSpace(parts[1])
+
+		if owner == "" || name == "" {
+			return nil, fmt.Errorf("invalid repository format '%s': owner and name cannot be empty", repoStr)
+		}
+
+		repos = append(repos, NWO{
+			Owner: owner,
+			Name:  name,
+		})
+	}
+
+	if len(repos) == 0 {
+		return nil, fmt.Errorf("no valid repositories found")
+	}
+
+	return repos, nil
+}
+
 func main() {
 	// Parse command line arguments
 	var (
@@ -60,6 +99,7 @@ func main() {
 		days        = flag.Int("days", defaultDays, "Number of days back to search (used if since/until not specified)")
 		outputDir   = flag.String("output-dir", "", "Output directory to write files (required)")
 		extraPrompt = flag.String("extra-prompt", "", "File containing additional prompt text to append to the default prompt")
+		repos       = flag.String("repos", "", "Comma-separated list of repositories in owner/name format (required)")
 	)
 	flag.Parse()
 
@@ -70,10 +110,19 @@ func main() {
 	if *outputDir == "" {
 		log.Fatalf("Output directory is required. Use -output-dir flag to specify the directory.")
 	}
+	if *repos == "" {
+		log.Fatalf("Repositories are required. Use -repos flag to specify repositories in owner/name format (e.g., 'github/token-scanning-service,owner/repo2').")
+	}
 
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(*outputDir, 0755); err != nil {
 		log.Fatalf("Failed to create output directory %s: %v", *outputDir, err)
+	}
+
+	// Parse repositories
+	repoConfigs, parseErr := parseRepositories(*repos)
+	if parseErr != nil {
+		log.Fatalf("Failed to parse repositories: %v", parseErr)
 	}
 
 	// Parse dates
@@ -99,9 +148,7 @@ func main() {
 		Username: *username,
 		Since:    sinceTime,
 		Until:    untilTime,
-		Repos: []RepoConfig{
-			{Owner: "github", Name: "token-scanning-service"},
-		},
+		Repos:    repoConfigs,
 	}
 
 	// Get GitHub token using gh CLI
@@ -201,14 +248,14 @@ func getGitHubToken() (string, error) {
 }
 
 // buildSearchQuery creates a search query for GitHub API
-func buildSearchQuery(repo RepoConfig, config Config) string {
+func buildSearchQuery(repo NWO, config Config) string {
 	return fmt.Sprintf("repo:%s/%s is:pr is:merged assignee:%s created:%s..%s",
 		repo.Owner, repo.Name, config.Username,
 		config.Since.Format(dateFormat), config.Until.Format(dateFormat))
 }
 
 // countMergedPRs counts the number of merged PRs for a repository without fetching full details
-func countMergedPRs(ctx context.Context, client *github.Client, repo RepoConfig, config Config) (int, error) {
+func countMergedPRs(ctx context.Context, client *github.Client, repo NWO, config Config) (int, error) {
 	query := buildSearchQuery(repo, config)
 
 	opts := &github.SearchOptions{
@@ -228,7 +275,7 @@ func countMergedPRs(ctx context.Context, client *github.Client, repo RepoConfig,
 }
 
 // getMergedPRsWithProgress retrieves merged PRs for a specific repository with progress tracking
-func getMergedPRsWithProgress(ctx context.Context, client *github.Client, repo RepoConfig, config Config, bar *progressbar.ProgressBar) ([]PullRequestInfo, error) {
+func getMergedPRsWithProgress(ctx context.Context, client *github.Client, repo NWO, config Config, bar *progressbar.ProgressBar) ([]PullRequestInfo, error) {
 	var allPRs []PullRequestInfo
 
 	query := buildSearchQuery(repo, config)
