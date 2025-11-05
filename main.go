@@ -253,9 +253,12 @@ func getGitHubToken() (string, error) {
 
 // buildSearchQuery creates a search query for GitHub API
 func buildSearchQuery(repo NWO, config Config) string {
-	return fmt.Sprintf("repo:%s/%s is:pr is:merged assignee:%s created:%s..%s",
+	query := fmt.Sprintf("repo:%s/%s is:pr is:merged assignee:%s created:%s..%s",
 		repo.Owner, repo.Name, config.Username,
 		config.Since.Format(dateFormat), config.Until.Format(dateFormat))
+
+	log.Printf("GitHub search query for %s/%s: %s", repo.Owner, repo.Name, query)
+	return query
 }
 
 // countMergedPRs counts the number of merged PRs for a repository without fetching full details
@@ -482,6 +485,8 @@ func generateSummaryWithCopilot(prsFilePath, extraPromptFile string) (string, er
 		// Append additional instructions to the default prompt
 		prompt = fmt.Sprintf("%s\n\nAdditional instructions:\n%s", prompt, strings.TrimSpace(string(customInstructions)))
 	}
+
+	log.Printf("Copilot prompt: %s", prompt)
 
 	// Use copilot CLI with the directory added and reference the filename in the prompt
 	cmd := exec.Command("copilot", "--add-dir", prsDir, "-p", prompt)
