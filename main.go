@@ -18,8 +18,7 @@ import (
 
 const (
 	// Default values
-	defaultUsername = "dshearer"
-	defaultDays     = 30
+	defaultDays = 30
 
 	// Date format for GitHub API
 	dateFormat = "2006-01-02"
@@ -55,7 +54,7 @@ type PullRequestInfo struct {
 func main() {
 	// Parse command line arguments
 	var (
-		username    = flag.String("user", defaultUsername, "GitHub username to filter PRs by assignee")
+		username    = flag.String("user", "", "GitHub username to filter PRs by assignee (required)")
 		since       = flag.String("since", "", "Start date (YYYY-MM-DD format)")
 		until       = flag.String("until", "", "End date (YYYY-MM-DD format)")
 		days        = flag.Int("days", defaultDays, "Number of days back to search (used if since/until not specified)")
@@ -63,6 +62,11 @@ func main() {
 		extraPrompt = flag.String("extra-prompt", "", "File containing additional prompt text to append to the default prompt")
 	)
 	flag.Parse()
+
+	// Validate required parameters
+	if *username == "" {
+		log.Fatalf("Username is required. Use -user flag to specify the GitHub username.")
+	}
 
 	// Parse dates
 	var sinceTime, untilTime time.Time
