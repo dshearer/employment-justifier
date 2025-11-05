@@ -25,6 +25,10 @@ const (
 
 	// Progress bar and pagination settings
 	perPageLimit = 100
+
+	defaultPrompt = `An employee is undergoing a performance review. They have contributed to the company by merging several pull requests.
+Make identify their major contributions based on the PR descriptions in @%s. Be sure to emphasize the impact of their work and any significant features or improvements they introduced.
+Include links to PRs.`
 )
 
 // Config holds the configuration for the PR retrieval
@@ -457,10 +461,6 @@ func extractFirstSection(description string) string {
 
 // generateSummaryWithCopilot uses the copilot CLI to generate a summary of the PR descriptions
 func generateSummaryWithCopilot(prsFilePath, extraPromptFile string) (string, error) {
-	const defaultPrompt = `An employee on GitHub's Secret Scanning team is undergoing a performance review. They have contributed to the Token Scanning Service by merging several pull requests.
-Make identify their major contributions based on the PR descriptions in @%s. Be sure to emphasize the impact of their work and any significant features or improvements they introduced.
-Include links to PRs.`
-
 	// Get the directory containing the prs file and the filename
 	prsDir, err := filepath.Abs(filepath.Dir(prsFilePath))
 	if err != nil {
