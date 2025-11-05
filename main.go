@@ -28,8 +28,8 @@ const (
 	perPageLimit = 100
 
 	defaultPrompt = `An employee is undergoing a performance review. They have contributed to the company by merging several pull requests.
-Make identify their major contributions based on the PR descriptions in @%s. Be sure to emphasize the impact of their work and any significant features or improvements they introduced.
-Include links to PRs.`
+Describe their major contributions based on the PR descriptions in @%s. Be sure to emphasize the impact of their work and any significant features or improvements they introduced.
+Include links to PRs. Don't write any files.`
 )
 
 // Config holds the complete application configuration
@@ -543,7 +543,7 @@ func generateSummaryWithCopilot(prsFilePath, extraPrompt string) (string, error)
 	log.Printf("Copilot prompt: %s", prompt)
 
 	// Use copilot CLI with the directory added and reference the filename in the prompt
-	cmd := exec.Command("copilot", "--add-dir", prsDir, "-p", prompt)
+	cmd := exec.Command("copilot", "--disable-builtin-mcps", "--deny-tool", "--no-color", "--no-custom-instructions", "--add-dir", prsDir, "-p", prompt)
 	cmd.Dir = prsDir
 
 	output, err := cmd.Output()
