@@ -1,4 +1,4 @@
-module github-pr-retriever
+module employment-justifier
 
 go 1.23.1
 
