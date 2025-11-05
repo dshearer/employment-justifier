@@ -253,7 +253,7 @@ func getGitHubToken() (string, error) {
 
 // buildSearchQuery creates a search query for GitHub API
 func buildSearchQuery(repo NWO, config Config) string {
-	query := fmt.Sprintf("repo:%s/%s is:pr is:merged assignee:%s created:%s..%s",
+	query := fmt.Sprintf("repo:%s/%s is:pr is:merged author:%s created:%s..%s",
 		repo.Owner, repo.Name, config.Username,
 		config.Since.Format(dateFormat), config.Until.Format(dateFormat))
 
