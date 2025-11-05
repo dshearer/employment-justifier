@@ -168,7 +168,7 @@ func main() {
 	client := github.NewClient(tc)
 
 	// Count total PRs across all repositories
-	fmt.Fprintf(os.Stderr, "Counting PRs across %d repositories...\n", len(config.Repos))
+	log.Printf("Counting PRs across %d repositories...", len(config.Repos))
 	totalPRs := 0
 	for _, repo := range config.Repos {
 		count, err := countMergedPRs(ctx, client, repo, config)
@@ -180,11 +180,11 @@ func main() {
 	}
 
 	if totalPRs == 0 {
-		fmt.Fprintf(os.Stderr, "No merged PRs found in the specified time range.\n")
+		log.Printf("No merged PRs found in the specified time range.")
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "Found %d PRs to process.\n", totalPRs)
+	log.Printf("Found %d PRs to process.", totalPRs)
 
 	// Create progress bar for individual PRs
 	bar := progressbar.NewOptions(totalPRs,
@@ -209,17 +209,17 @@ func main() {
 	}
 
 	bar.Finish()
-	fmt.Fprintf(os.Stderr, "\nCompleted processing %d merged PRs\n", len(allPRs))
+	log.Printf("Completed processing %d merged PRs", len(allPRs))
 
 	// Write PR descriptions to the output directory
 	prsFile := filepath.Join(*outputDir, "prs.md")
-	fmt.Fprintf(os.Stderr, "Writing PR descriptions to %s\n", prsFile)
+	log.Printf("Writing PR descriptions to %s", prsFile)
 	if err := outputPRs(allPRs, prsFile); err != nil {
 		log.Fatalf("Error writing PR descriptions to output file: %v", err)
 	}
 
 	// Use copilot CLI to summarize the content
-	fmt.Fprintf(os.Stderr, "Generating summary with Copilot...\n")
+	log.Printf("Generating summary with Copilot...")
 	summary, err := generateSummaryWithCopilot(prsFile, *extraPrompt)
 	if err != nil {
 		log.Fatalf("Error generating summary: %v", err)
@@ -366,7 +366,7 @@ func outputPRs(prs []PullRequestInfo, outputFile string) error {
 	}
 	if outputFile != "" {
 		defer writer.Close()
-		fmt.Fprintf(os.Stderr, "Writing PR details to %s\n", outputFile)
+		log.Printf("Writing PR details to %s", outputFile)
 	}
 
 	// Write markdown header
@@ -517,7 +517,7 @@ func writeSummaryToOutput(summary, outputFile string) error {
 	}
 	if outputFile != "" {
 		defer writer.Close()
-		fmt.Fprintf(os.Stderr, "Writing summary to %s\n", outputFile)
+		log.Printf("Writing summary to %s", outputFile)
 	}
 
 	// Write the summary
