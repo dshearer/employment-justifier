@@ -1,0 +1,470 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/google/go-github/v56/github"
+	"github.com/schollz/progressbar/v3"
+	"golang.org/x/oauth2"
+)
+
+const (
+	// Default values
+	defaultUsername = "dshearer"
+	defaultDays     = 30
+
+	// Date format for GitHub API
+	dateFormat = "2006-01-02"
+
+	// Progress bar and pagination settings
+	perPageLimit = 100
+)
+
+// Config holds the configuration for the PR retrieval
+type Config struct {
+	Username string
+	Since    time.Time
+	Until    time.Time
+	Repos    []RepoConfig
+}
+
+// RepoConfig represents a repository configuration
+type RepoConfig struct {
+	Owner string
+	Name  string
+}
+
+// PullRequestInfo holds the information we want to display about PRs
+type PullRequestInfo struct {
+	Repository  string
+	Title       string
+	Description string
+	URL         string
+	CreatedAt   time.Time
+	MergedAt    *time.Time
+}
+
+func main() {
+	// Parse command line arguments
+	var (
+		username    = flag.String("user", defaultUsername, "GitHub username to filter PRs by assignee")
+		since       = flag.String("since", "", "Start date (YYYY-MM-DD format)")
+		until       = flag.String("until", "", "End date (YYYY-MM-DD format)")
+		days        = flag.Int("days", defaultDays, "Number of days back to search (used if since/until not specified)")
+		outputFile  = flag.String("output-file", "", "Write output to file instead of stdout")
+		extraPrompt = flag.String("extra-prompt", "", "File containing additional prompt text to append to the default prompt")
+	)
+	flag.Parse()
+
+	// Parse dates
+	var sinceTime, untilTime time.Time
+	var err error
+
+	if *since != "" && *until != "" {
+		sinceTime, err = time.Parse(dateFormat, *since)
+		if err != nil {
+			log.Fatalf("Invalid since date format: %v", err)
+		}
+		untilTime, err = time.Parse(dateFormat, *until)
+		if err != nil {
+			log.Fatalf("Invalid until date format: %v", err)
+		}
+	} else {
+		// Use days parameter
+		untilTime = time.Now()
+		sinceTime = untilTime.AddDate(0, 0, -*days)
+	}
+
+	config := Config{
+		Username: *username,
+		Since:    sinceTime,
+		Until:    untilTime,
+		Repos: []RepoConfig{
+			{Owner: "github", Name: "token-scanning-service"},
+		},
+	}
+
+	// Get GitHub token using gh CLI
+	token, err := getGitHubToken()
+	if err != nil {
+		log.Fatalf("Failed to get GitHub token: %v", err)
+	}
+
+	// Create GitHub client
+	ctx := context.Background()
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	tc := oauth2.NewClient(ctx, ts)
+	client := github.NewClient(tc)
+
+	// Count total PRs across all repositories
+	fmt.Fprintf(os.Stderr, "Counting PRs across %d repositories...\n", len(config.Repos))
+	totalPRs := 0
+	for _, repo := range config.Repos {
+		count, err := countMergedPRs(ctx, client, repo, config)
+		if err != nil {
+			log.Printf("Warning: Error counting PRs from %s/%s: %v", repo.Owner, repo.Name, err)
+			continue
+		}
+		totalPRs += count
+	}
+
+	if totalPRs == 0 {
+		fmt.Fprintf(os.Stderr, "No merged PRs found in the specified time range.\n")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "Found %d PRs to process.\n", totalPRs)
+
+	// Create progress bar for individual PRs
+	bar := progressbar.NewOptions(totalPRs,
+		progressbar.OptionSetDescription("Processing PRs"),
+		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionShowCount(),
+		progressbar.OptionShowIts(),
+		progressbar.OptionSetPredictTime(true),
+		progressbar.OptionFullWidth(),
+		progressbar.OptionSetRenderBlankState(true),
+	)
+
+	// Retrieve PRs for each repository with progress tracking
+	var allPRs []PullRequestInfo
+	for _, repo := range config.Repos {
+		prs, err := getMergedPRsWithProgress(ctx, client, repo, config, bar)
+		if err != nil {
+			log.Printf("Error fetching PRs from %s/%s: %v", repo.Owner, repo.Name, err)
+			continue
+		}
+		allPRs = append(allPRs, prs...)
+	}
+
+	bar.Finish()
+	fmt.Fprintf(os.Stderr, "\nCompleted processing %d merged PRs\n", len(allPRs))
+
+	// Create temporary file for PR descriptions
+	tempFile, err := os.CreateTemp("", "pr-descriptions-*.md")
+	if err != nil {
+		log.Fatalf("Error creating temporary file: %v", err)
+	}
+	defer func() {
+		tempFile.Close()
+		os.Remove(tempFile.Name()) // Clean up temp file when done
+	}()
+
+	fmt.Fprintf(os.Stderr, "Writing PR descriptions to temporary file...\n")
+	// Write PR descriptions to temp file
+	if err := outputPRs(allPRs, tempFile.Name()); err != nil {
+		log.Fatalf("Error writing PR descriptions: %v", err)
+	}
+
+	// Use copilot CLI to summarize the content
+	fmt.Fprintf(os.Stderr, "Generating summary with Copilot...\n")
+	summary, err := generateSummaryWithCopilot(tempFile.Name(), *extraPrompt)
+	if err != nil {
+		log.Fatalf("Error generating summary: %v", err)
+	}
+
+	// Write summary to final output
+	if err := writeSummaryToOutput(summary, *outputFile); err != nil {
+		log.Fatalf("Error writing summary: %v", err)
+	}
+}
+
+// getGitHubToken retrieves the GitHub token using the gh CLI
+func getGitHubToken() (string, error) {
+	cmd := exec.Command("gh", "auth", "token")
+	output, err := cmd.Output()
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("failed to get token from gh CLI: %w\nStderr: %s\nMake sure you're logged in with 'gh auth login'", err, string(exitError.Stderr))
+		}
+		return "", fmt.Errorf("failed to get token from gh CLI: %w (make sure you're logged in with 'gh auth login')", err)
+	}
+
+	token := strings.TrimSpace(string(output))
+	if token == "" {
+		return "", fmt.Errorf("empty token received from gh CLI")
+	}
+
+	return token, nil
+}
+
+// buildSearchQuery creates a search query for GitHub API
+func buildSearchQuery(repo RepoConfig, config Config) string {
+	return fmt.Sprintf("repo:%s/%s is:pr is:merged assignee:%s created:%s..%s",
+		repo.Owner, repo.Name, config.Username,
+		config.Since.Format(dateFormat), config.Until.Format(dateFormat))
+}
+
+// countMergedPRs counts the number of merged PRs for a repository without fetching full details
+func countMergedPRs(ctx context.Context, client *github.Client, repo RepoConfig, config Config) (int, error) {
+	query := buildSearchQuery(repo, config)
+
+	opts := &github.SearchOptions{
+		Sort:  "created",
+		Order: "desc",
+		ListOptions: github.ListOptions{
+			PerPage: 1, // We only need the count, not the actual results
+		},
+	}
+
+	result, _, err := client.Search.Issues(ctx, query, opts)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count PRs: %w", err)
+	}
+
+	return result.GetTotal(), nil
+}
+
+// getMergedPRsWithProgress retrieves merged PRs for a specific repository with progress tracking
+func getMergedPRsWithProgress(ctx context.Context, client *github.Client, repo RepoConfig, config Config, bar *progressbar.ProgressBar) ([]PullRequestInfo, error) {
+	var allPRs []PullRequestInfo
+
+	query := buildSearchQuery(repo, config)
+
+	opts := &github.SearchOptions{
+		Sort:  "created",
+		Order: "desc",
+		ListOptions: github.ListOptions{
+			PerPage: perPageLimit,
+		},
+	}
+
+	for {
+		result, resp, err := client.Search.Issues(ctx, query, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to search PRs: %w", err)
+		}
+
+		for _, issue := range result.Issues {
+			if bar != nil {
+				bar.Describe(fmt.Sprintf("Processing PR #%d from %s/%s", issue.GetNumber(), repo.Owner, repo.Name))
+			}
+
+			// Convert GitHub issue to our PR info structure
+			prInfo := PullRequestInfo{
+				Repository:  fmt.Sprintf("%s/%s", repo.Owner, repo.Name),
+				Title:       issue.GetTitle(),
+				Description: issue.GetBody(),
+				URL:         issue.GetHTMLURL(),
+				CreatedAt:   issue.GetCreatedAt().Time,
+			}
+
+			// Get the actual PR to get merge information and full description
+			pr, _, err := client.PullRequests.Get(ctx, repo.Owner, repo.Name, issue.GetNumber())
+			if err != nil {
+				log.Printf("Warning: failed to get PR details for #%d: %v", issue.GetNumber(), err)
+			} else {
+				// Update description with PR body if available (more detailed than issue body)
+				if pr.GetBody() != "" {
+					prInfo.Description = pr.GetBody()
+				}
+				// Set merge time if available
+				if pr.MergedAt != nil {
+					mergedAt := pr.GetMergedAt().Time
+					prInfo.MergedAt = &mergedAt
+				}
+			}
+
+			allPRs = append(allPRs, prInfo)
+			if bar != nil {
+				bar.Add(1)
+			}
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return allPRs, nil
+}
+
+// getOutputWriter returns the appropriate writer for the given output file
+func getOutputWriter(outputFile string) (*os.File, error) {
+	if outputFile != "" {
+		writer, err := os.Create(outputFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create output file %s: %w", outputFile, err)
+		}
+		return writer, nil
+	}
+	return os.Stdout, nil
+}
+
+// outputPRs outputs the PR information as Markdown
+func outputPRs(prs []PullRequestInfo, outputFile string) error {
+	writer, err := getOutputWriter(outputFile)
+	if err != nil {
+		return err
+	}
+	if outputFile != "" {
+		defer writer.Close()
+		fmt.Fprintf(os.Stderr, "Writing PR details to %s\n", outputFile)
+	}
+
+	// Write markdown header
+	fmt.Fprintf(writer, "# Merged Pull Requests\n\n")
+	fmt.Fprintf(writer, "Found %d merged pull requests.\n\n", len(prs))
+
+	if len(prs) == 0 {
+		fmt.Fprintf(writer, "*No merged PRs found.*\n")
+		return nil
+	}
+
+	// Group PRs by repository
+	repoGroups := make(map[string][]PullRequestInfo)
+	for _, pr := range prs {
+		repoGroups[pr.Repository] = append(repoGroups[pr.Repository], pr)
+	}
+
+	// Output each repository group
+	for repo, repoPRs := range repoGroups {
+		fmt.Fprintf(writer, "## %s\n\n", repo)
+
+		for _, pr := range repoPRs {
+			// PR title as H3 with link
+			fmt.Fprintf(writer, "### [%s](%s)\n\n", pr.Title, pr.URL)
+
+			// Metadata table
+			fmt.Fprintf(writer, "| Field | Value |\n")
+			fmt.Fprintf(writer, "|-------|-------|\n")
+			fmt.Fprintf(writer, "| **Created** | %s |\n", pr.CreatedAt.Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(writer, "| **Link** | <%s> |\n", pr.URL)
+
+			if pr.MergedAt != nil {
+				fmt.Fprintf(writer, "| **Merged** | %s |\n", pr.MergedAt.Format("2006-01-02 15:04:05"))
+			} else {
+				fmt.Fprintf(writer, "| **Merged** | *Not available* |\n")
+			}
+
+			fmt.Fprintf(writer, "\n")
+
+			// PR description - extract only the first section
+			if strings.TrimSpace(pr.Description) != "" {
+				fmt.Fprintf(writer, "#### Description\n\n")
+				firstSection := extractFirstSection(pr.Description)
+				fmt.Fprintf(writer, "%s\n\n", firstSection)
+			} else {
+				fmt.Fprintf(writer, "#### Description\n\n*No description provided.*\n\n")
+			}
+
+			// Separator between PRs
+			fmt.Fprintf(writer, "---\n\n")
+		}
+	}
+
+	return nil
+}
+
+// extractFirstSection extracts only the first section from a PR description
+// that follows the standard template format
+func extractFirstSection(description string) string {
+	lines := strings.Split(description, "\n")
+	var firstSection []string
+	inFirstSection := false
+
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+
+		// Check if this is the start of the first section
+		if strings.HasPrefix(trimmedLine, "### What are you trying to accomplish?") {
+			inFirstSection = true
+			continue // Skip the section header itself
+		}
+
+		// Check if we've hit another section header (starts with ###)
+		if inFirstSection && strings.HasPrefix(trimmedLine, "###") {
+			break // Stop at the next section
+		}
+
+		// If we're in the first section, collect the content
+		if inFirstSection {
+			firstSection = append(firstSection, line)
+		}
+	}
+
+	// Join the lines and clean up
+	result := strings.Join(firstSection, "\n")
+	result = strings.TrimSpace(result)
+
+	// If we didn't find the standard format, return the original description
+	if result == "" {
+		return description
+	}
+
+	return result
+}
+
+// generateSummaryWithCopilot uses the copilot CLI to generate a summary of the PR descriptions
+func generateSummaryWithCopilot(tempFilePath, extraPromptFile string) (string, error) {
+	const defaultPrompt = `An employee on GitHub's Secret Scanning team is undergoing a performance review. They have contributed to the Token Scanning Service by merging several pull requests.
+Make identify their major contributions based on the PR descriptions in @%s. Be sure to emphasize the impact of their work and any significant features or improvements they introduced.
+Include links to PRs.`
+
+	// Get the directory containing the temp file to add it to copilot's context
+	tempDir := filepath.Dir(tempFilePath)
+	tempFileName := filepath.Base(tempFilePath)
+
+	// Build the prompt starting with the default
+	prompt := fmt.Sprintf(defaultPrompt, tempFileName)
+
+	// Add custom instructions if provided
+	if extraPromptFile != "" {
+		// Read additional instructions from file
+		customInstructions, err := os.ReadFile(extraPromptFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to read instructions file %s: %w", extraPromptFile, err)
+		}
+
+		// Append additional instructions to the default prompt
+		prompt = fmt.Sprintf("%s\n\nAdditional instructions:\n%s", prompt, strings.TrimSpace(string(customInstructions)))
+	}
+
+	// Use copilot CLI to summarize the content
+	cmd := exec.Command("copilot", "--add-dir", tempDir, "-p", prompt)
+	// Set the working directory to the temp directory so copilot can find the file
+	cmd.Dir = tempDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		// If there's an error, try to get stderr for more details
+		if exitError, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("failed to run copilot CLI: %w\nStderr: %s", err, string(exitError.Stderr))
+		}
+		return "", fmt.Errorf("failed to run copilot CLI: %w (make sure copilot CLI is installed and available)", err)
+	}
+
+	summary := strings.TrimSpace(string(output))
+	if summary == "" {
+		return "", fmt.Errorf("copilot CLI returned empty summary")
+	}
+
+	return summary, nil
+}
+
+// writeSummaryToOutput writes the summary to the specified output file or stdout
+func writeSummaryToOutput(summary, outputFile string) error {
+	writer, err := getOutputWriter(outputFile)
+	if err != nil {
+		return err
+	}
+	if outputFile != "" {
+		defer writer.Close()
+		fmt.Fprintf(os.Stderr, "Writing summary to %s\n", outputFile)
+	}
+
+	// Write the summary
+	fmt.Fprintf(writer, "# PR Summary\n\n")
+	fmt.Fprintf(writer, "%s\n", summary)
+
+	return nil
+}
