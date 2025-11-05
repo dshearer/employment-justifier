@@ -36,6 +36,4 @@ Thumbs.db
 *.tmp
 *.temp
 
-output.yml
-output.md
-summary.md
+output/*

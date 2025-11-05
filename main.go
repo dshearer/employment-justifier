@@ -58,7 +58,7 @@ func main() {
 		since       = flag.String("since", "", "Start date (YYYY-MM-DD format)")
 		until       = flag.String("until", "", "End date (YYYY-MM-DD format)")
 		days        = flag.Int("days", defaultDays, "Number of days back to search (used if since/until not specified)")
-		outputFile  = flag.String("output-file", "", "Write output to file instead of stdout")
+		outputDir   = flag.String("output-dir", "", "Output directory to write files (required)")
 		extraPrompt = flag.String("extra-prompt", "", "File containing additional prompt text to append to the default prompt")
 	)
 	flag.Parse()
@@ -66,6 +66,14 @@ func main() {
 	// Validate required parameters
 	if *username == "" {
 		log.Fatalf("Username is required. Use -user flag to specify the GitHub username.")
+	}
+	if *outputDir == "" {
+		log.Fatalf("Output directory is required. Use -output-dir flag to specify the directory.")
+	}
+
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(*outputDir, 0755); err != nil {
+		log.Fatalf("Failed to create output directory %s: %v", *outputDir, err)
 	}
 
 	// Parse dates
@@ -152,31 +160,23 @@ func main() {
 	bar.Finish()
 	fmt.Fprintf(os.Stderr, "\nCompleted processing %d merged PRs\n", len(allPRs))
 
-	// Create temporary file for PR descriptions
-	tempFile, err := os.CreateTemp("", "pr-descriptions-*.md")
-	if err != nil {
-		log.Fatalf("Error creating temporary file: %v", err)
-	}
-	defer func() {
-		tempFile.Close()
-		os.Remove(tempFile.Name()) // Clean up temp file when done
-	}()
-
-	fmt.Fprintf(os.Stderr, "Writing PR descriptions to temporary file...\n")
-	// Write PR descriptions to temp file
-	if err := outputPRs(allPRs, tempFile.Name()); err != nil {
-		log.Fatalf("Error writing PR descriptions: %v", err)
+	// Write PR descriptions to the output directory
+	prsFile := filepath.Join(*outputDir, "prs.md")
+	fmt.Fprintf(os.Stderr, "Writing PR descriptions to %s\n", prsFile)
+	if err := outputPRs(allPRs, prsFile); err != nil {
+		log.Fatalf("Error writing PR descriptions to output file: %v", err)
 	}
 
 	// Use copilot CLI to summarize the content
 	fmt.Fprintf(os.Stderr, "Generating summary with Copilot...\n")
-	summary, err := generateSummaryWithCopilot(tempFile.Name(), *extraPrompt)
+	summary, err := generateSummaryWithCopilot(prsFile, *extraPrompt)
 	if err != nil {
 		log.Fatalf("Error generating summary: %v", err)
 	}
 
 	// Write summary to final output
-	if err := writeSummaryToOutput(summary, *outputFile); err != nil {
+	summaryFile := filepath.Join(*outputDir, "summary.md")
+	if err := writeSummaryToOutput(summary, summaryFile); err != nil {
 		log.Fatalf("Error writing summary: %v", err)
 	}
 }
@@ -409,17 +409,20 @@ func extractFirstSection(description string) string {
 }
 
 // generateSummaryWithCopilot uses the copilot CLI to generate a summary of the PR descriptions
-func generateSummaryWithCopilot(tempFilePath, extraPromptFile string) (string, error) {
+func generateSummaryWithCopilot(prsFilePath, extraPromptFile string) (string, error) {
 	const defaultPrompt = `An employee on GitHub's Secret Scanning team is undergoing a performance review. They have contributed to the Token Scanning Service by merging several pull requests.
 Make identify their major contributions based on the PR descriptions in @%s. Be sure to emphasize the impact of their work and any significant features or improvements they introduced.
 Include links to PRs.`
 
-	// Get the directory containing the temp file to add it to copilot's context
-	tempDir := filepath.Dir(tempFilePath)
-	tempFileName := filepath.Base(tempFilePath)
+	// Get the directory containing the prs file and the filename
+	prsDir, err := filepath.Abs(filepath.Dir(prsFilePath))
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path for directory: %w", err)
+	}
+	prsFileName := filepath.Base(prsFilePath)
 
-	// Build the prompt starting with the default
-	prompt := fmt.Sprintf(defaultPrompt, tempFileName)
+	// Build the prompt starting with the default, using just the filename
+	prompt := fmt.Sprintf(defaultPrompt, prsFileName)
 
 	// Add custom instructions if provided
 	if extraPromptFile != "" {
@@ -433,10 +436,9 @@ Include links to PRs.`
 		prompt = fmt.Sprintf("%s\n\nAdditional instructions:\n%s", prompt, strings.TrimSpace(string(customInstructions)))
 	}
 
-	// Use copilot CLI to summarize the content
-	cmd := exec.Command("copilot", "--add-dir", tempDir, "-p", prompt)
-	// Set the working directory to the temp directory so copilot can find the file
-	cmd.Dir = tempDir
+	// Use copilot CLI with the directory added and reference the filename in the prompt
+	cmd := exec.Command("copilot", "--add-dir", prsDir, "-p", prompt)
+	cmd.Dir = prsDir
 
 	output, err := cmd.Output()
 	if err != nil {
