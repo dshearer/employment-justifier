@@ -148,6 +148,31 @@ func loadConfig(configPath string) (*Config, error) {
 	return &config, nil
 }
 
+// confirmOverwrite checks if a file exists and asks user for confirmation to overwrite
+// Returns true if file should be written (either doesn't exist or user confirmed overwrite)
+func confirmOverwrite(filePath string) (bool, error) {
+	if _, err := os.Stat(filePath); err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist, should write it
+			return true, nil
+		}
+		return false, fmt.Errorf("error checking file %s: %w", filePath, err)
+	}
+
+	// File exists, ask for confirmation
+	fmt.Printf("File %s already exists. Do you want to overwrite it? (y/N): ", filePath)
+	var response string
+	fmt.Scanln(&response)
+
+	response = strings.ToLower(strings.TrimSpace(response))
+	if response == "y" || response == "yes" {
+		return true, nil
+	}
+
+	// User chose not to overwrite
+	return false, nil
+}
+
 func main() {
 	// Parse command line arguments
 	var (
@@ -166,67 +191,92 @@ func main() {
 		log.Fatalf("Failed to create output directory %s: %v", config.OutputDir, err)
 	}
 
-	// Get GitHub token using gh CLI
-	token, err := getGitHubToken()
+	// Check for existing output files and confirm overwrite BEFORE doing expensive work
+	prsFile := filepath.Join(config.OutputDir, "prs.md")
+	summaryFile := filepath.Join(config.OutputDir, "summary.md")
+
+	// Check summary file first - if user doesn't want to generate new summary, exit early
+	shouldWriteSummary, err := confirmOverwrite(summaryFile)
 	if err != nil {
-		log.Fatalf("Failed to get GitHub token: %v", err)
+		log.Fatalf("Cannot check summary file: %v", err)
 	}
 
-	// Create GitHub client
-	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	tc := oauth2.NewClient(ctx, ts)
-	client := github.NewClient(tc)
-
-	// Count total PRs across all repositories
-	log.Printf("Counting PRs across %d repositories...", len(config.ReposNWO))
-	totalPRs := 0
-	for _, repo := range config.ReposNWO {
-		count, err := countMergedPRs(ctx, client, repo, *config)
-		if err != nil {
-			log.Printf("Warning: Error counting PRs from %s/%s: %v", repo.Owner, repo.Name, err)
-			continue
-		}
-		totalPRs += count
-	}
-
-	if totalPRs == 0 {
-		log.Printf("No merged PRs found in the specified time range.")
+	if !shouldWriteSummary {
+		log.Printf("Summary file %s already exists and user chose not to overwrite. Nothing to do.", summaryFile)
 		return
 	}
 
-	log.Printf("Found %d PRs to process.", totalPRs)
-
-	// Create progress bar for individual PRs
-	bar := progressbar.NewOptions(totalPRs,
-		progressbar.OptionSetDescription("Processing PRs"),
-		progressbar.OptionSetWriter(os.Stderr),
-		progressbar.OptionShowCount(),
-		progressbar.OptionShowIts(),
-		progressbar.OptionSetPredictTime(true),
-		progressbar.OptionFullWidth(),
-		progressbar.OptionSetRenderBlankState(true),
-	)
-
-	// Retrieve PRs for each repository with progress tracking
-	var allPRs []PullRequestInfo
-	for _, repo := range config.ReposNWO {
-		prs, err := getMergedPRsWithProgress(ctx, client, repo, *config, bar)
-		if err != nil {
-			log.Printf("Error fetching PRs from %s/%s: %v", repo.Owner, repo.Name, err)
-			continue
-		}
-		allPRs = append(allPRs, prs...)
+	// Now check PR file since we know we'll need it for summary generation
+	shouldWritePRs, err := confirmOverwrite(prsFile)
+	if err != nil {
+		log.Fatalf("Cannot check PR file: %v", err)
 	}
 
-	bar.Finish()
-	log.Printf("Completed processing %d merged PRs", len(allPRs))
+	// Only fetch PRs if we need to write the PR file
+	if shouldWritePRs {
+		// Get GitHub token using gh CLI
+		token, err := getGitHubToken()
+		if err != nil {
+			log.Fatalf("Failed to get GitHub token: %v", err)
+		}
 
-	// Write PR descriptions to the output directory
-	prsFile := filepath.Join(config.OutputDir, "prs.md")
-	log.Printf("Writing PR descriptions to %s", prsFile)
-	if err := outputPRs(allPRs, prsFile); err != nil {
-		log.Fatalf("Error writing PR descriptions to output file: %v", err)
+		// Create GitHub client
+		ctx := context.Background()
+		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+		tc := oauth2.NewClient(ctx, ts)
+		client := github.NewClient(tc)
+
+		// Count total PRs across all repositories
+		log.Printf("Counting PRs across %d repositories...", len(config.ReposNWO))
+		totalPRs := 0
+		for _, repo := range config.ReposNWO {
+			count, err := countMergedPRs(ctx, client, repo, *config)
+			if err != nil {
+				log.Printf("Warning: Error counting PRs from %s/%s: %v", repo.Owner, repo.Name, err)
+				continue
+			}
+			totalPRs += count
+		}
+
+		if totalPRs == 0 {
+			log.Printf("No merged PRs found in the specified time range.")
+			return
+		}
+
+		log.Printf("Found %d PRs to process.", totalPRs)
+
+		// Create progress bar for individual PRs
+		bar := progressbar.NewOptions(totalPRs,
+			progressbar.OptionSetDescription("Processing PRs"),
+			progressbar.OptionSetWriter(os.Stderr),
+			progressbar.OptionShowCount(),
+			progressbar.OptionShowIts(),
+			progressbar.OptionSetPredictTime(true),
+			progressbar.OptionFullWidth(),
+			progressbar.OptionSetRenderBlankState(true),
+		)
+
+		// Retrieve PRs for each repository with progress tracking
+		var allPRs []PullRequestInfo
+		for _, repo := range config.ReposNWO {
+			prs, err := getMergedPRsWithProgress(ctx, client, repo, *config, bar)
+			if err != nil {
+				log.Printf("Error fetching PRs from %s/%s: %v", repo.Owner, repo.Name, err)
+				continue
+			}
+			allPRs = append(allPRs, prs...)
+		}
+
+		bar.Finish()
+		log.Printf("Completed processing %d merged PRs", len(allPRs))
+
+		// Write PR descriptions to the output directory
+		log.Printf("Writing PR descriptions to %s", prsFile)
+		if err := outputPRs(allPRs, prsFile); err != nil {
+			log.Fatalf("Error writing PR descriptions to output file: %v", err)
+		}
+	} else {
+		log.Printf("Using existing PR descriptions from %s", prsFile)
 	}
 
 	// Use copilot CLI to summarize the content
@@ -237,7 +287,6 @@ func main() {
 	}
 
 	// Write summary to final output
-	summaryFile := filepath.Join(config.OutputDir, "summary.md")
 	if err := writeSummaryToOutput(summary, summaryFile); err != nil {
 		log.Fatalf("Error writing summary: %v", err)
 	}
