@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-github/v56/github"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/oauth2"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -31,17 +32,85 @@ Make identify their major contributions based on the PR descriptions in @%s. Be 
 Include links to PRs.`
 )
 
-// Config holds the configuration for the PR retrieval
+// Config holds the complete application configuration
 type Config struct {
-	Username string
-	Since    time.Time
-	Until    time.Time
-	Repos    []NWO
+	Username    string   `yaml:"username"`
+	Since       string   `yaml:"since,omitempty"`
+	Until       string   `yaml:"until,omitempty"`
+	Days        int      `yaml:"days,omitempty"`
+	OutputDir   string   `yaml:"output_dir"`
+	ExtraPrompt string   `yaml:"extra-prompt,omitempty"`
+	Repos       []string `yaml:"repos"`
+
+	// Parsed fields (not in YAML)
+	SinceTime time.Time `yaml:"-"`
+	UntilTime time.Time `yaml:"-"`
+	ReposNWO  []NWO     `yaml:"-"`
 }
 
 type NWO struct {
 	Owner string
 	Name  string
+}
+
+// Parse validates and parses the configuration
+func (c *Config) Parse() error {
+	// Validate required fields
+	if c.Username == "" {
+		return fmt.Errorf("username is required")
+	}
+	if c.OutputDir == "" {
+		return fmt.Errorf("output_dir is required")
+	}
+	if len(c.Repos) == 0 {
+		return fmt.Errorf("repos list cannot be empty")
+	}
+
+	// Set default days if not specified
+	if c.Days == 0 && c.Since == "" && c.Until == "" {
+		c.Days = defaultDays
+	}
+
+	// Parse repositories
+	var repos []NWO
+	for _, repoStr := range c.Repos {
+		parts := strings.Split(strings.TrimSpace(repoStr), "/")
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid repository format '%s': expected 'owner/name'", repoStr)
+		}
+
+		owner := strings.TrimSpace(parts[0])
+		name := strings.TrimSpace(parts[1])
+
+		if owner == "" || name == "" {
+			return fmt.Errorf("invalid repository format '%s': owner and name cannot be empty", repoStr)
+		}
+
+		repos = append(repos, NWO{
+			Owner: owner,
+			Name:  name,
+		})
+	}
+	c.ReposNWO = repos
+
+	// Parse dates
+	var err error
+	if c.Since != "" && c.Until != "" {
+		c.SinceTime, err = time.Parse(dateFormat, c.Since)
+		if err != nil {
+			return fmt.Errorf("invalid since date format '%s': %w", c.Since, err)
+		}
+		c.UntilTime, err = time.Parse(dateFormat, c.Until)
+		if err != nil {
+			return fmt.Errorf("invalid until date format '%s': %w", c.Until, err)
+		}
+	} else {
+		// Use days parameter
+		c.UntilTime = time.Now()
+		c.SinceTime = c.UntilTime.AddDate(0, 0, -c.Days)
+	}
+
+	return nil
 }
 
 // PullRequestInfo holds the information we want to display about PRs
@@ -54,105 +123,47 @@ type PullRequestInfo struct {
 	MergedAt    *time.Time
 }
 
-// parseRepositories parses a comma-separated list of repositories in owner/name format
-func parseRepositories(repoList string) ([]NWO, error) {
-	if repoList == "" {
-		return nil, fmt.Errorf("repository list cannot be empty")
+// loadConfig loads configuration from a YAML file
+func loadConfig(configPath string) (*Config, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
 	}
 
-	var repos []NWO
-	repoStrings := strings.Split(repoList, ",")
+	var config Config
 
-	for _, repoStr := range repoStrings {
-		repoStr = strings.TrimSpace(repoStr)
-		if repoStr == "" {
-			continue // Skip empty entries
-		}
+	// Create a decoder with strict mode to reject unknown fields
+	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+	decoder.KnownFields(true)
 
-		parts := strings.Split(repoStr, "/")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid repository format '%s': expected 'owner/name'", repoStr)
-		}
-
-		owner := strings.TrimSpace(parts[0])
-		name := strings.TrimSpace(parts[1])
-
-		if owner == "" || name == "" {
-			return nil, fmt.Errorf("invalid repository format '%s': owner and name cannot be empty", repoStr)
-		}
-
-		repos = append(repos, NWO{
-			Owner: owner,
-			Name:  name,
-		})
+	if err := decoder.Decode(&config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 	}
 
-	if len(repos) == 0 {
-		return nil, fmt.Errorf("no valid repositories found")
+	// Parse and validate the configuration
+	if err := config.Parse(); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
-	return repos, nil
+	return &config, nil
 }
 
 func main() {
 	// Parse command line arguments
 	var (
-		username    = flag.String("user", "", "GitHub username to filter PRs by assignee (required)")
-		since       = flag.String("since", "", "Start date (YYYY-MM-DD format)")
-		until       = flag.String("until", "", "End date (YYYY-MM-DD format)")
-		days        = flag.Int("days", defaultDays, "Number of days back to search (used if since/until not specified)")
-		outputDir   = flag.String("output-dir", "", "Output directory to write files (required)")
-		extraPrompt = flag.String("extra-prompt", "", "File containing additional prompt text to append to the default prompt")
-		repos       = flag.String("repos", "", "Comma-separated list of repositories in owner/name format (required)")
+		configFile = flag.String("config", "config.yaml", "Path to configuration file")
 	)
 	flag.Parse()
 
-	// Validate required parameters
-	if *username == "" {
-		log.Fatalf("Username is required. Use -user flag to specify the GitHub username.")
-	}
-	if *outputDir == "" {
-		log.Fatalf("Output directory is required. Use -output-dir flag to specify the directory.")
-	}
-	if *repos == "" {
-		log.Fatalf("Repositories are required. Use -repos flag to specify repositories in owner/name format (e.g., 'github/token-scanning-service,owner/repo2').")
+	// Load configuration from file
+	config, err := loadConfig(*configFile)
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
 	// Create output directory if it doesn't exist
-	if err := os.MkdirAll(*outputDir, 0755); err != nil {
-		log.Fatalf("Failed to create output directory %s: %v", *outputDir, err)
-	}
-
-	// Parse repositories
-	repoConfigs, parseErr := parseRepositories(*repos)
-	if parseErr != nil {
-		log.Fatalf("Failed to parse repositories: %v", parseErr)
-	}
-
-	// Parse dates
-	var sinceTime, untilTime time.Time
-	var err error
-
-	if *since != "" && *until != "" {
-		sinceTime, err = time.Parse(dateFormat, *since)
-		if err != nil {
-			log.Fatalf("Invalid since date format: %v", err)
-		}
-		untilTime, err = time.Parse(dateFormat, *until)
-		if err != nil {
-			log.Fatalf("Invalid until date format: %v", err)
-		}
-	} else {
-		// Use days parameter
-		untilTime = time.Now()
-		sinceTime = untilTime.AddDate(0, 0, -*days)
-	}
-
-	config := Config{
-		Username: *username,
-		Since:    sinceTime,
-		Until:    untilTime,
-		Repos:    repoConfigs,
+	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
+		log.Fatalf("Failed to create output directory %s: %v", config.OutputDir, err)
 	}
 
 	// Get GitHub token using gh CLI
@@ -168,10 +179,10 @@ func main() {
 	client := github.NewClient(tc)
 
 	// Count total PRs across all repositories
-	log.Printf("Counting PRs across %d repositories...", len(config.Repos))
+	log.Printf("Counting PRs across %d repositories...", len(config.ReposNWO))
 	totalPRs := 0
-	for _, repo := range config.Repos {
-		count, err := countMergedPRs(ctx, client, repo, config)
+	for _, repo := range config.ReposNWO {
+		count, err := countMergedPRs(ctx, client, repo, *config)
 		if err != nil {
 			log.Printf("Warning: Error counting PRs from %s/%s: %v", repo.Owner, repo.Name, err)
 			continue
@@ -199,8 +210,8 @@ func main() {
 
 	// Retrieve PRs for each repository with progress tracking
 	var allPRs []PullRequestInfo
-	for _, repo := range config.Repos {
-		prs, err := getMergedPRsWithProgress(ctx, client, repo, config, bar)
+	for _, repo := range config.ReposNWO {
+		prs, err := getMergedPRsWithProgress(ctx, client, repo, *config, bar)
 		if err != nil {
 			log.Printf("Error fetching PRs from %s/%s: %v", repo.Owner, repo.Name, err)
 			continue
@@ -212,7 +223,7 @@ func main() {
 	log.Printf("Completed processing %d merged PRs", len(allPRs))
 
 	// Write PR descriptions to the output directory
-	prsFile := filepath.Join(*outputDir, "prs.md")
+	prsFile := filepath.Join(config.OutputDir, "prs.md")
 	log.Printf("Writing PR descriptions to %s", prsFile)
 	if err := outputPRs(allPRs, prsFile); err != nil {
 		log.Fatalf("Error writing PR descriptions to output file: %v", err)
@@ -220,13 +231,13 @@ func main() {
 
 	// Use copilot CLI to summarize the content
 	log.Printf("Generating summary with Copilot...")
-	summary, err := generateSummaryWithCopilot(prsFile, *extraPrompt)
+	summary, err := generateSummaryWithCopilot(prsFile, config.ExtraPrompt)
 	if err != nil {
 		log.Fatalf("Error generating summary: %v", err)
 	}
 
 	// Write summary to final output
-	summaryFile := filepath.Join(*outputDir, "summary.md")
+	summaryFile := filepath.Join(config.OutputDir, "summary.md")
 	if err := writeSummaryToOutput(summary, summaryFile); err != nil {
 		log.Fatalf("Error writing summary: %v", err)
 	}
@@ -255,7 +266,7 @@ func getGitHubToken() (string, error) {
 func buildSearchQuery(repo NWO, config Config) string {
 	query := fmt.Sprintf("repo:%s/%s is:pr is:merged author:%s created:%s..%s",
 		repo.Owner, repo.Name, config.Username,
-		config.Since.Format(dateFormat), config.Until.Format(dateFormat))
+		config.SinceTime.Format(dateFormat), config.UntilTime.Format(dateFormat))
 
 	log.Printf("GitHub search query for %s/%s: %s", repo.Owner, repo.Name, query)
 	return query
@@ -463,7 +474,7 @@ func extractFirstSection(description string) string {
 }
 
 // generateSummaryWithCopilot uses the copilot CLI to generate a summary of the PR descriptions
-func generateSummaryWithCopilot(prsFilePath, extraPromptFile string) (string, error) {
+func generateSummaryWithCopilot(prsFilePath, extraPrompt string) (string, error) {
 	// Get the directory containing the prs file and the filename
 	prsDir, err := filepath.Abs(filepath.Dir(prsFilePath))
 	if err != nil {
@@ -475,15 +486,9 @@ func generateSummaryWithCopilot(prsFilePath, extraPromptFile string) (string, er
 	prompt := fmt.Sprintf(defaultPrompt, prsFileName)
 
 	// Add custom instructions if provided
-	if extraPromptFile != "" {
-		// Read additional instructions from file
-		customInstructions, err := os.ReadFile(extraPromptFile)
-		if err != nil {
-			return "", fmt.Errorf("failed to read instructions file %s: %w", extraPromptFile, err)
-		}
-
+	if extraPrompt != "" {
 		// Append additional instructions to the default prompt
-		prompt = fmt.Sprintf("%s\n\nAdditional instructions:\n%s", prompt, strings.TrimSpace(string(customInstructions)))
+		prompt = fmt.Sprintf("%s\n\nAdditional instructions:\n%s", prompt, strings.TrimSpace(extraPrompt))
 	}
 
 	log.Printf("Copilot prompt: %s", prompt)

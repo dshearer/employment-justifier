@@ -1,0 +1,23 @@
+# Employment Justifier Configuration File
+# Copy this file to config.yaml and modify as needed
+
+# GitHub username to filter PRs by (required)
+username: your-github-username
+
+# Date range for PR search (optional - use either since/until OR days)
+# If neither since/until nor days are specified, defaults to last 30 days
+since: "2025-05-01"  # Start date (YYYY-MM-DD format)
+until: "2025-10-31"  # End date (YYYY-MM-DD format)
+# days: 30           # Alternative: number of days back to search
+
+# Output directory for generated files (required)
+output_dir: "./output"
+
+# Optional: path to file containing additional prompt instructions for Copilot
+extra-prompt: ""
+
+# List of repositories to analyze (required)
+# Format: owner/repository-name
+repos:
+  - "github/token-scanning-service"
+  - "owner/another-repo"

@@ -32,27 +32,55 @@ gh auth status
 
 ## Usage
 
-```bash
-go run . -user <github-username> -repos <owner/repo1,owner/repo2> -output-dir <directory> [options]
-```
+The tool now uses a configuration file instead of command-line arguments for better maintainability.
 
-### Required Parameters
+### Quick Start
 
-- `-user`: GitHub username to filter PRs by assignee
-- `-repos`: Comma-separated list of repositories in owner/name format
-- `-output-dir`: Directory where output files will be written
+1. **Create a configuration file** (`config.yaml`) with your settings:
+   ```yaml
+   username: your-github-username
+   since: "2025-05-01"
+   until: "2025-10-31"
+   output_dir: "./output"
+   repos:
+     - "github/token-scanning-service"
+     - "owner/another-repo"
+   ```
 
-### Optional Parameters
+2. **Run the tool:**
+   ```bash
+   go run . -config config.yaml
+   ```
 
-- `-since`: Start date (YYYY-MM-DD format)
-- `-until`: End date (YYYY-MM-DD format)
-- `-days`: Number of days back to search (default: 30, used if since/until not specified)
-- `-extra-prompt`: File containing additional prompt text for the summary generation
+### Configuration File Format
 
-### Example
+The configuration file uses YAML format with the following fields:
 
-```bash
-go run . -user johndoe -repos "github/cli,microsoft/vscode" -output-dir ./results -days 90
+#### Required Fields
+- `username`: GitHub username to filter PRs by
+- `output_dir`: Directory where output files will be written
+- `repos`: List of repositories in "owner/name" format
+
+#### Optional Fields
+- `since`: Start date (YYYY-MM-DD format)
+- `until`: End date (YYYY-MM-DD format)
+- `days`: Number of days back to search (default: 30, used if since/until not specified)
+- `extra_prompt`: Path to file containing additional prompt instructions for Copilot
+
+### Command Line Options
+
+- `-config`: Path to configuration file (default: `config.yaml`)
+
+### Example Configuration
+
+```yaml
+username: johndoe
+days: 90
+output_dir: ./results
+repos:
+  - "github/cli"
+  - "microsoft/vscode"
+extra_prompt: "custom-instructions.txt"
 ```
 
 ## Output
