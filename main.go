@@ -29,7 +29,7 @@ const (
 
 	defaultPrompt = `An employee is undergoing a performance review. They have contributed to the company by merging several pull requests.
 Describe their major contributions based on the PR descriptions in @%s. Be sure to emphasize the impact of their work and any significant features or improvements they introduced.
-Include links to PRs. Don't write any files.`
+Include links to PRs. Don't write any files. For each contribution, include an approximate date range during which the work was done.`
 )
 
 // Config holds the complete application configuration
