@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestExtractFirstSection(t *testing.T) {
+func TestExtractDescriptionForTSS(t *testing.T) {
 	tests := []struct {
 		name        string
 		description string
@@ -194,13 +194,13 @@ Implementation details...`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractFirstSection(tt.description)
+			result := extractDescriptionForTSS(tt.description)
 			assert.Equal(t, tt.expected, result, "extractFirstSection should return expected output")
 		})
 	}
 }
 
-func TestExtractFirstSection_EdgeCases(t *testing.T) {
+func TestExtractDescriptionForTSS_EdgeCases(t *testing.T) {
 	t.Run("Very long first section", func(t *testing.T) {
 		longContent := "This is a very long section content. "
 		for i := 0; i < 100; i++ {
@@ -215,7 +215,7 @@ func TestExtractFirstSection_EdgeCases(t *testing.T) {
 
 Implementation details...`
 
-		result := extractFirstSection(description)
+		result := extractDescriptionForTSS(description)
 		assert.Contains(t, result, "This is a very long section content")
 		assert.Contains(t, result, "Line")
 		assert.NotContains(t, result, "Implementation details")
@@ -248,7 +248,7 @@ func newFunction() {
 
 It improves performance significantly.`
 
-		result := extractFirstSection(description)
+		result := extractDescriptionForTSS(description)
 		assert.Equal(t, expected, result)
 	})
 
@@ -270,7 +270,149 @@ Implementation...`
 		// Note: #### headers also match the "###" prefix, so they will break the extraction
 		expected := `This PR includes:`
 
-		result := extractFirstSection(description)
+		result := extractDescriptionForTSS(description)
 		assert.Equal(t, expected, result)
 	})
+}
+
+func TestExtractDescriptionForDotcom(t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		expected    string
+	}{
+		{
+			name: "truncate at approach section",
+			description: `<!--
+Provide context and explain why this pull request exists. Include screenshots, videos, and graphs here, if you have any. -->
+
+This is a general description of the PR.
+
+It does some important things.
+
+### What approach did you choose and why?
+
+I chose this approach because...
+
+### Other section
+
+More content here.`,
+			expected: `This is a general description of the PR.
+
+It does some important things.`,
+		},
+		{
+			name: "no approach section",
+			description: `This is a simple description without the approach section.
+
+Just some basic content.`,
+			expected: `This is a simple description without the approach section.
+
+Just some basic content.`,
+		},
+		{
+			name:        "empty description",
+			description: "",
+			expected:    "",
+		},
+		{
+			name:        "whitespace only description",
+			description: "   \n  \t  \n   ",
+			expected:    "",
+		},
+		{
+			name: "approach section at beginning",
+			description: `### What approach did you choose and why?
+
+This should result in empty content before.`,
+			expected: "",
+		},
+		{
+			name: "approach section in middle with content before and after",
+			description: `Initial description content here.
+
+Some more details about the change.
+
+### What approach did you choose and why?
+
+Technical implementation details...
+
+### How to test
+
+Testing instructions here.`,
+			expected: `Initial description content here.
+
+Some more details about the change.`,
+		},
+		{
+			name: "multiple approach sections - stops at first",
+			description: `Description content.
+
+### What approach did you choose and why?
+
+First approach section.
+
+### Other section
+
+Other content.
+
+### What approach did you choose and why?
+
+Second approach section (should not be reached).`,
+			expected: `Description content.`,
+		},
+		{
+			name: "case sensitive - different casing not matched",
+			description: `Description content.
+
+### what approach did you choose and why?
+
+This should not be matched due to case sensitivity.`,
+			expected: `Description content.
+
+### what approach did you choose and why?
+
+This should not be matched due to case sensitivity.`,
+		},
+		{
+			name: "What are you trying to accomplish",
+			description: `<!-- Authors: Please fill out this form carefully and completely. See also https://thehub.github.com/engineering/development-and-ops/deployment/deploying-dotcom/ -->
+
+_**Reviewers:** Please read carefully. By approving, you support the deployment and mitigation plans as well as the code change. If anything is unclear or missing, please ask for updates._
+
+### Context
+
+<!--
+This section ties together context explaining why this pull request exists.
+
+Code changes should be in response to an issue. If one does not already exist, create one in the relevant repository.
+Link related discussions, comments, pull requests, and feature releases (see https://github.com/github/releases#readme).
+Format links with a Markdown list so that each title unfurls automatically, e.g.,
+- Closes <issue URL>
+- Based on <preceding pull request URL>
+- Part of <feature release URL>
+-->
+
+- Part of https://github.com/github/secret-scanning/issues/5976
+
+### What are you trying to accomplish?
+
+<!-- Describe the changes. Include screenshots, videos, and graphs here, if you have any. -->
+
+Add feature flag that gates generic secrets enterprise policy and require advanced security for generic secrets availability.
+
+### Which environments does this change target?
+
+Blah blah
+`,
+			expected: "Add feature flag that gates generic secrets enterprise policy and require advanced security for generic secrets availability.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractDescriptionForDotcom(tt.description)
+			assert.Equal(t, tt.expected, result, "extractDescriptionForDotcom should return expected output")
+		})
+	}
 }

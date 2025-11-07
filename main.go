@@ -466,11 +466,12 @@ func outputPRs(prs []PullRequestInfo, outputFile string) error {
 
 			fmt.Fprintf(writer, "\n")
 
-			// PR description - extract only the first section
+			// PR description - extract appropriate description based on repository
 			if strings.TrimSpace(pr.Description) != "" {
 				fmt.Fprintf(writer, "#### Description\n\n")
-				firstSection := extractFirstSection(pr.Description)
-				fmt.Fprintf(writer, "%s\n\n", firstSection)
+
+				descriptionText := getRepositorySpecificDescription(pr.Repository, pr.Description)
+				fmt.Fprintf(writer, "%s\n\n", descriptionText)
 			} else {
 				fmt.Fprintf(writer, "#### Description\n\n*No description provided.*\n\n")
 			}
@@ -483,9 +484,66 @@ func outputPRs(prs []PullRequestInfo, outputFile string) error {
 	return nil
 }
 
-// extractFirstSection extracts only the first section from a PR description
+// filterHTMLComments removes HTML comments from the given text while preserving line structure
+func filterHTMLComments(text string) string {
+	lines := strings.Split(text, "\n")
+	var cleanLines []string
+	inComment := false
+
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+
+		// Check for comment start and end on the same line
+		if strings.HasPrefix(trimmedLine, "<!--") && strings.HasSuffix(trimmedLine, "-->") {
+			continue // Skip single-line comments
+		}
+
+		// Check for comment start
+		if strings.HasPrefix(trimmedLine, "<!--") {
+			inComment = true
+			continue
+		}
+
+		// Check for comment end
+		if strings.HasSuffix(trimmedLine, "-->") {
+			inComment = false
+			continue
+		}
+
+		// Skip lines inside comments
+		if inComment {
+			continue
+		}
+
+		cleanLines = append(cleanLines, line)
+	}
+
+	return strings.Join(cleanLines, "\n")
+}
+
+// filterHTMLCommentsAndEmptyLinesAtStart removes HTML comments and empty lines from the start of content
+func filterHTMLCommentsAndEmptyLinesAtStart(lines []string) []string {
+	var contentLines []string
+
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+
+		// Skip HTML comments and empty lines at the start
+		if len(contentLines) == 0 {
+			if trimmedLine == "" || strings.HasPrefix(trimmedLine, "<!--") || strings.HasSuffix(trimmedLine, "-->") {
+				continue
+			}
+		}
+
+		contentLines = append(contentLines, line)
+	}
+
+	return contentLines
+}
+
+// extractDescriptionForTSS extracts only the first section from a PR description
 // that follows the standard template format
-func extractFirstSection(description string) string {
+func extractDescriptionForTSS(description string) string {
 	lines := strings.Split(description, "\n")
 	var firstSection []string
 	inFirstSection := false
@@ -520,6 +578,72 @@ func extractFirstSection(description string) string {
 	}
 
 	return result
+}
+
+func extractDescriptionForDotcom(description string) string {
+	// First, try to extract content from "### What are you trying to accomplish?" section
+	accomplishMarker := "### What are you trying to accomplish?"
+	accomplishIndex := strings.Index(description, accomplishMarker)
+
+	if accomplishIndex != -1 {
+		// Find the start of the content after the marker
+		contentStart := accomplishIndex + len(accomplishMarker)
+		remainingContent := description[contentStart:]
+
+		// Split into lines and find the actual content (skip empty lines and comments)
+		lines := strings.Split(remainingContent, "\n")
+		var contentLines []string
+
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
+
+			// Stop if we hit another section header
+			if strings.HasPrefix(trimmedLine, "###") {
+				break
+			}
+
+			contentLines = append(contentLines, line)
+		}
+
+		// Filter HTML comments and empty lines at start, then trim
+		contentLines = filterHTMLCommentsAndEmptyLinesAtStart(contentLines)
+		extractedContent := strings.Join(contentLines, "\n")
+		extractedContent = strings.TrimSpace(extractedContent)
+
+		// If we found non-empty content, return it
+		if extractedContent != "" {
+			return extractedContent
+		}
+	}
+
+	// Fallback: Look for the "### What approach did you choose and why?" section and truncate there
+	approachMarker := "### What approach did you choose and why?"
+	index := strings.Index(description, approachMarker)
+
+	var contentToProcess string
+	if index == -1 {
+		contentToProcess = description
+	} else {
+		// Extract everything before the marker
+		contentToProcess = description[:index]
+	}
+
+	// Filter out HTML comments and clean up the content
+	result := filterHTMLComments(contentToProcess)
+	return strings.TrimSpace(result)
+}
+
+// getRepositorySpecificDescription returns the appropriate description text based on the repository
+func getRepositorySpecificDescription(repository, description string) string {
+	switch repository {
+	case "github/token-scanning-service":
+		return extractDescriptionForTSS(description)
+	case "github/github":
+		return extractDescriptionForDotcom(description)
+	default:
+		// Use full description for other repositories
+		return description
+	}
 }
 
 // generateSummaryWithCopilot uses the copilot CLI to generate a summary of the PR descriptions
